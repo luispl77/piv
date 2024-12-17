@@ -1,0 +1,11 @@
+# Dataset directories
+1.1/alameda/*
+!1.1/alameda/homography.py
+1.1/CTownAirport_1.1/
+
+# Large media files
+*.mp4
+*.pdf
+
+# System files
+.DS_Store 
