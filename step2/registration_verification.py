@@ -2,294 +2,357 @@ import numpy as np
 import scipy.io
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-from point_cloud_generator import create_point_cloud
 
-def load_keypoints(frame_idx):
-    """Load keypoints for a specific frame."""
-    keypoints = scipy.io.loadmat('office/kp.mat')
+###############################################################################
+# 1) Simple Functions for Loading & Matching Keypoints
+###############################################################################
+def load_keypoints(kp_mat_path, frame_idx):
+    """
+    Load keypoints for frame `frame_idx` (0-based) from kp.mat file.
+    """
+    keypoints = scipy.io.loadmat(kp_mat_path)
     feature_name = f'Feature_img{frame_idx+1}_00000'
     frame_features = keypoints[feature_name][0,0]
-    return frame_features['kp'], frame_features['desc']
+    kp = frame_features['kp']   # shape (N,2)
+    desc = frame_features['desc']   # shape (N,128) or so
+    return kp, desc
 
-def find_matches(desc1, desc2, ratio_threshold=0.8):
-    """Find matches between descriptors using ratio test."""
+def find_matches(desc1, desc2, ratio_threshold=0.75):
+    """
+    Naive descriptor matching with ratio test.
+    Returns a list of (idx1, idx2) matches.
+    """
     matches = []
-    for i, desc in enumerate(desc1):
-        # Compute distances to all descriptors in desc2
-        distances = np.linalg.norm(desc2 - desc, axis=1)
-        
-        # Find best and second best matches
-        idx = np.argsort(distances)
-        best_dist = distances[idx[0]]
-        second_best = distances[idx[1]]
-        
-        # Apply ratio test
-        if best_dist < ratio_threshold * second_best:
-            matches.append((i, idx[0]))
-    
+    for i, d1 in enumerate(desc1):
+        # L2 distances from d1 to all desc2
+        dist = np.linalg.norm(desc2 - d1, axis=1)
+        idx_sorted = np.argsort(dist)
+        best_idx = idx_sorted[0]
+        second_idx = idx_sorted[1]
+        best_dist = dist[best_idx]
+        second_dist = dist[second_idx]
+        # ratio test
+        if best_dist < ratio_threshold * second_dist:
+            matches.append((i, best_idx))
     return np.array(matches)
 
-def visualize_matches(points1, points2, matches, title="Point Cloud Matches"):
-    """Visualize matched points between two point clouds."""
-    fig = plt.figure(figsize=(15, 10))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # Plot all points with low alpha
-    ax.scatter(points1[:,0], points1[:,1], points1[:,2], c='blue', s=1, alpha=0.1, label='Cloud 1')
-    ax.scatter(points2[:,0], points2[:,1], points2[:,2], c='red', s=1, alpha=0.1, label='Cloud 2')
-    
-    # Plot matched points with high alpha
-    matched_points1 = points1[matches[:,0]]
-    matched_points2 = points2[matches[:,1]]
-    
-    ax.scatter(matched_points1[:,0], matched_points1[:,1], matched_points1[:,2], 
-              c='blue', s=20, alpha=1, label='Matches 1')
-    ax.scatter(matched_points2[:,0], matched_points2[:,1], matched_points2[:,2], 
-              c='red', s=20, alpha=1, label='Matches 2')
-    
-    # Draw lines between matches
-    for i in range(len(matches)):
-        p1 = matched_points1[i]
-        p2 = matched_points2[i]
-        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], 'g-', alpha=0.5)
-    
-    ax.set_xlabel('X (meters)')
-    ax.set_ylabel('Y (meters)')
-    ax.set_zlabel('Z (meters)')
-    ax.set_title(title)
-    ax.legend()
-    
-    # Set equal aspect ratio
-    ax.set_box_aspect([1,1,1])
-    plt.show()
+###############################################################################
+# 2) Simple Functions for Loading Frames & Converting Keypoints to 3D
+###############################################################################
+def load_frame(cams_info, frame_idx):
+    """
+    Returns the rgb, depth, and focal_length for frame `frame_idx`.
+    """
+    frame_data = cams_info[frame_idx, 0]
+    rgb = frame_data['rgb'][0,0]          # shape (H,W,3)
+    depth = frame_data['depth'][0,0]      # shape (H,W)
+    focal_length = frame_data['focal_lenght'][0,0]  # note the 'typo' in field name
+    return rgb, depth, focal_length
 
-def visualize_registration_result(points1, points2, R, t, title="Registration Result"):
-    """Visualize point clouds before and after registration."""
-    # Transform second point cloud
+def keypoints_to_3d(kp, depth, focal_length):
+    """
+    Convert 2D keypoints (kp) into 3D coordinates using the depth map.
+    Assumes same fx, fy and principal point at center.
+    """
+    fx = float(focal_length[0,0]) if focal_length.size > 1 else float(focal_length)
+    fy = fx
+    H, W = depth.shape
+    cx, cy = (W-1)/2.0, (H-1)/2.0
+    
+    # Round keypoints to nearest pixel
+    u = np.rint(kp[:,0]).astype(int)
+    v = np.rint(kp[:,1]).astype(int)
+    
+    # Ensure they are within bounds
+    valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    u = u[valid]
+    v = v[valid]
+    
+    z = depth[v, u]
+    # Filter out zero depth
+    valid_depth = z > 0
+    u = u[valid_depth]
+    v = v[valid_depth]
+    z = z[valid_depth]
+    
+    # Match point_cloud_generator.py coordinate system
+    X_cam = -(u - cx)*z / fx
+    Y_cam = -(v - cy)*z / fy  # Note the negation to match point_cloud_generator
+    Z_cam = z
+    
+    pts_3d = np.stack([X_cam, Y_cam, Z_cam], axis=-1)
+    return pts_3d
+
+def get_dense_points(depth, focal_length, subsample=50):
+    """Generate a denser point cloud for visualization, similar to point_cloud_generator."""
+    height, width = depth.shape
+    fx = float(focal_length[0,0]) if focal_length.size > 1 else float(focal_length)
+    cx, cy = (width-1)/2.0, (height-1)/2.0
+    
+    # Create pixel coordinate grid
+    u, v = np.meshgrid(np.arange(width), np.arange(height))
+    
+    # Get all points where depth is valid
+    valid_points = depth > 0
+    
+    # Subsample valid points
+    valid_indices = np.where(valid_points)
+    num_points = len(valid_indices[0])
+    sample_size = num_points // subsample
+    sample_indices = np.random.choice(num_points, sample_size, replace=False)
+    
+    v_valid = valid_indices[0][sample_indices]
+    u_valid = valid_indices[1][sample_indices]
+    z_valid = depth[v_valid, u_valid]
+    
+    # Calculate X and Y coordinates (matching point_cloud_generator.py)
+    x_valid = -(u_valid - cx) * z_valid / fx
+    y_valid = -(v_valid - cy) * z_valid / fx
+    
+    return np.stack([x_valid, y_valid, z_valid], axis=1)
+
+###############################################################################
+# 3) Estimate a Simple Rigid Transform (R, t) from 3D-3D Correspondences
+###############################################################################
+def estimate_rigid_transform(p1, p2):
+    """
+    p1, p2: Nx3 arrays of matched 3D points.
+    Return R (3x3) and t (3,) that aligns p2 to p1, i.e.
+       p1 ~ R * p2 + t
+    Uses a basic Procrustes approach (SVD).
+    """
+    # Remove any potential outliers or zero shapes
+    n = min(len(p1), len(p2))
+    if n < 3:
+        return np.eye(3), np.zeros(3)
+    
+    # 1) Compute centroids
+    c1 = np.mean(p1, axis=0)
+    c2 = np.mean(p2, axis=0)
+    p1c = p1 - c1
+    p2c = p2 - c2
+    
+    # 2) SVD on covariance
+    H = p1c.T @ p2c
+    U, S, Vt = np.linalg.svd(H)
+    R = U @ Vt
+    # fix reflection if needed
+    if np.linalg.det(R) < 0:
+        U[:,-1] *= -1
+        R = U @ Vt
+    
+    t = c1 - R @ c2
+    return R, t
+
+def estimate_rigid_transform_ransac(p1, p2, max_iterations=100, distance_threshold=0.1):
+    """
+    Estimate rigid transform using RANSAC to handle outliers.
+    """
+    best_num_inliers = 0
+    best_R = np.eye(3)
+    best_t = np.zeros(3)
+    best_inliers = None
+    n_points = len(p1)
+    
+    if n_points < 3:
+        return best_R, best_t
+    
+    for _ in range(max_iterations):
+        # 1. Sample 3 random points
+        idx = np.random.choice(n_points, 3, replace=False)
+        sample1 = p1[idx]
+        sample2 = p2[idx]
+        
+        # 2. Estimate transform from samples
+        R, t = estimate_rigid_transform(sample1, sample2)
+        
+        # 3. Transform all points and count inliers
+        p2_transformed = (R @ p2.T).T + t
+        distances = np.linalg.norm(p1 - p2_transformed, axis=1)
+        inliers = distances < distance_threshold
+        num_inliers = np.sum(inliers)
+        
+        # 4. Update best if we found more inliers
+        if num_inliers > best_num_inliers:
+            best_num_inliers = num_inliers
+            best_R = R
+            best_t = t
+            best_inliers = inliers
+    
+    # Final refinement using all inliers
+    if best_inliers is not None and np.sum(best_inliers) >= 3:
+        R, t = estimate_rigid_transform(p1[best_inliers], p2[best_inliers])
+        return R, t
+    
+    return best_R, best_t
+
+###############################################################################
+# 4) Visualization (Before / After Registration)
+###############################################################################
+def visualize_registration(points1, points2, R, t):
+    """
+    points1, points2: Nx3 arrays (these could be entire clouds or matched points).
+    R, t: the transformation that aligns points2 to points1.
+    We show side-by-side subplots: before and after.
+    """
     points2_transformed = (R @ points2.T).T + t
     
-    # Create two subplots
-    fig = plt.figure(figsize=(20, 10))
+    fig = plt.figure(figsize=(15,7))
     
-    # Before registration
+    # Before
     ax1 = fig.add_subplot(121, projection='3d')
-    ax1.scatter(points1[:,0], points1[:,1], points1[:,2], c='blue', s=1, alpha=0.5, label='Cloud 1')
-    ax1.scatter(points2[:,0], points2[:,1], points2[:,2], c='red', s=1, alpha=0.5, label='Cloud 2')
-    ax1.set_title('Before Registration')
-    ax1.set_xlabel('X (meters)')
-    ax1.set_ylabel('Y (meters)')
-    ax1.set_zlabel('Z (meters)')
+    ax1.scatter(points1[:,0], points1[:,1], points1[:,2], c='blue', s=1, alpha=0.3, label='Points1')
+    ax1.scatter(points2[:,0], points2[:,1], points2[:,2], c='red', s=1, alpha=0.3, label='Points2')
+    ax1.set_title("Before Registration")
     ax1.legend()
     ax1.set_box_aspect([1,1,1])
     
-    # After registration
+    # Set same limits for both plots
+    all_points = np.vstack([points1, points2, points2_transformed])
+    min_vals = np.min(all_points, axis=0)
+    max_vals = np.max(all_points, axis=0)
+    ranges = max_vals - min_vals
+    center = (max_vals + min_vals) / 2
+    max_range = np.max(ranges)
+    
+    for ax in [ax1]:
+        ax.set_xlim(center[0] - max_range/2, center[0] + max_range/2)
+        ax.set_ylim(center[1] - max_range/2, center[1] + max_range/2)
+        ax.set_zlim(center[2] - max_range/2, center[2] + max_range/2)
+        ax.view_init(elev=30, azim=45)
+    
+    # After - show two views
     ax2 = fig.add_subplot(122, projection='3d')
-    ax2.scatter(points1[:,0], points1[:,1], points1[:,2], c='blue', s=1, alpha=0.5, label='Cloud 1')
-    ax2.scatter(points2_transformed[:,0], points2_transformed[:,1], points2_transformed[:,2], 
-                c='red', s=1, alpha=0.5, label='Cloud 2 (Transformed)')
-    ax2.set_title('After Registration')
-    ax2.set_xlabel('X (meters)')
-    ax2.set_ylabel('Y (meters)')
-    ax2.set_zlabel('Z (meters)')
+    ax2.scatter(points1[:,0], points1[:,1], points1[:,2], c='blue', s=1, alpha=0.3, label='Points1')
+    ax2.scatter(points2_transformed[:,0], points2_transformed[:,1], points2_transformed[:,2],
+                c='red', s=1, alpha=0.3, label='Points2 transformed')
+    ax2.set_title("After Registration")
     ax2.legend()
     ax2.set_box_aspect([1,1,1])
     
-    plt.suptitle(title)
-    plt.show()
+    for ax in [ax2]:
+        ax.set_xlim(center[0] - max_range/2, center[0] + max_range/2)
+        ax.set_ylim(center[1] - max_range/2, center[1] + max_range/2)
+        ax.set_zlim(center[2] - max_range/2, center[2] + max_range/2)
+        ax.view_init(elev=30, azim=135)  # Different view angle
     
-    # Print transformation details
-    print("\nTransformation Details:")
-    # Convert rotation matrix to Euler angles
-    euler_angles = np.array([
-        np.arctan2(R[2,1], R[2,2]),
-        np.arctan2(-R[2,0], np.sqrt(R[2,1]**2 + R[2,2]**2)),
-        np.arctan2(R[1,0], R[0,0])
-    ]) * 180 / np.pi
-    
-    print(f"Rotation angles (degrees):")
-    print(f"  Roll:  {euler_angles[0]:.2f}°")
-    print(f"  Pitch: {euler_angles[1]:.2f}°")
-    print(f"  Yaw:   {euler_angles[2]:.2f}°")
-    print(f"\nTranslation (meters):")
-    print(f"  X: {t[0]:.3f}")
-    print(f"  Y: {t[1]:.3f}")
-    print(f"  Z: {t[2]:.3f}")
-
-def get_3d_points_from_keypoints(kp, depth, focal_length, principal_point):
-    """Convert 2D keypoints to 3D points using depth data."""
-    fx, fy = float(focal_length[0,0]), float(focal_length[0,0])
-    cx, cy = principal_point
-    
-    # Round keypoint coordinates to get depth values
-    u = np.round(kp[:,0]).astype(int)
-    v = np.round(kp[:,1]).astype(int)
-    
-    # Get depth values for keypoints
-    z = depth[v, u]
-    
-    # Back-project to 3D
-    x = -(u - cx) * z / fx
-    y = (v - cy) * z / fy
-    
-    return np.stack([x, y, z], axis=1)
-
-def verify_keypoint_mapping(frame_data, kp, title="Keypoint 3D Mapping"):
-    """Visualize how 2D keypoints map to 3D space."""
-    rgb = frame_data['rgb'][0,0]
-    depth = frame_data['depth'][0,0]
-    focal_length = frame_data['focal_lenght'][0,0]
-    height, width = depth.shape
-    principal_point = ((width-1)/2, (height-1)/2)
-    
-    # Round keypoint coordinates to get depth values
-    u = np.round(kp[:,0]).astype(int)
-    v = np.round(kp[:,1]).astype(int)
-    
-    # Ensure keypoints are within image bounds
-    valid_coords = (u >= 0) & (u < width) & (v >= 0) & (v < height)
-    valid_depths = np.zeros_like(u, dtype=bool)
-    valid_depths[valid_coords] = depth[v[valid_coords], u[valid_coords]] > 0
-    
-    # Get full point cloud
-    points, colors = create_point_cloud(rgb, depth, focal_length, principal_point)
-    
-    # Get 3D points for keypoints
-    keypoint_3d = get_3d_points_from_keypoints(kp, depth, focal_length, principal_point)
-    
-    # Create figure with 2x2 subplots
-    fig = plt.figure(figsize=(20, 15))
-    
-    # 1. RGB Image with keypoints
-    ax1 = fig.add_subplot(221)
-    ax1.imshow(rgb)
-    ax1.scatter(kp[valid_depths,0], kp[valid_depths,1], c='g', s=20, label='Valid Keypoints')
-    ax1.scatter(kp[~valid_depths,0], kp[~valid_depths,1], c='r', s=20, label='Invalid Keypoints')
-    ax1.set_title('RGB Image with Keypoints')
-    ax1.legend()
-    
-    # 2. Depth map with keypoints
-    ax2 = fig.add_subplot(222)
-    depth_vis = depth.copy()
-    depth_vis[depth_vis == 0] = np.nan  # Make invalid depths transparent
-    im = ax2.imshow(depth_vis, cmap='viridis')
-    ax2.scatter(kp[valid_depths,0], kp[valid_depths,1], c='g', s=20, label='Valid Keypoints')
-    ax2.scatter(kp[~valid_depths,0], kp[~valid_depths,1], c='r', s=20, label='Invalid Keypoints')
-    ax2.set_title('Depth Map with Keypoints')
-    plt.colorbar(im, ax=ax2, label='Depth (meters)')
-    ax2.legend()
-    
-    # 3. 3D point cloud with keypoints
-    ax3 = fig.add_subplot(223, projection='3d')
-    ax3.scatter(points[:,0], points[:,1], points[:,2], c='gray', s=1, alpha=0.1, label='Full Cloud')
-    scatter = ax3.scatter(keypoint_3d[valid_depths,0], 
-                         keypoint_3d[valid_depths,1], 
-                         keypoint_3d[valid_depths,2],
-                         c=depth[v[valid_depths], u[valid_coords]],
-                         cmap='viridis',
-                         s=50, alpha=1, label='Valid Keypoints')
-    plt.colorbar(scatter, ax=ax3, label='Depth (meters)')
-    ax3.set_xlabel('X (meters)')
-    ax3.set_ylabel('Y (meters)')
-    ax3.set_zlabel('Z (meters)')
-    ax3.set_title('3D Point Cloud with Keypoints')
-    ax3.legend()
-    ax3.set_box_aspect([1,1,1])
-    
-    # 4. Local patches around some sample keypoints
-    ax4 = fig.add_subplot(224)
-    ax4.imshow(rgb)
-    # Sample 5 random valid keypoints
-    sample_idx = np.random.choice(np.where(valid_depths)[0], min(5, np.sum(valid_depths)), replace=False)
-    colors = ['r', 'g', 'b', 'y', 'm']
-    for i, idx in enumerate(sample_idx):
-        x, y = kp[idx]
-        # Draw patch boundary
-        patch_size = 20
-        rect = plt.Rectangle((x-patch_size/2, y-patch_size/2), patch_size, patch_size, 
-                           fill=False, color=colors[i])
-        ax4.add_patch(rect)
-        # Add 3D coordinate annotation
-        coord = keypoint_3d[idx]
-        ax4.annotate(f'P{i+1}: ({coord[0]:.2f}, {coord[1]:.2f}, {coord[2]:.2f})',
-                    (x+patch_size/2, y+patch_size/2), color=colors[i])
-    ax4.set_title('Sample Keypoint Patches with 3D Coordinates')
-    
-    plt.suptitle(title)
     plt.tight_layout()
     plt.show()
+
+###############################################################################
+# 5) MAIN: Putting it All Together
+###############################################################################
+def process_frame_pair(cams_info, frame_idx1, frame_idx2):
+    """Process a pair of frames and return registration quality metrics."""
+    # 1) Load frames
+    rgb1, depth1, f1 = load_frame(cams_info, frame_idx1)
+    rgb2, depth2, f2 = load_frame(cams_info, frame_idx2)
     
-    # Print statistics
-    print(f"\nKeypoint Mapping Statistics:")
-    print(f"Total keypoints: {len(kp)}")
-    print(f"Keypoints within image bounds: {np.sum(valid_coords)}")
-    print(f"Keypoints with valid depth: {np.sum(valid_depths)}")
-    if np.sum(valid_depths) > 0:
-        depths = depth[v[valid_depths], u[valid_coords]]
-        print(f"Depth range for valid keypoints: {depths.min():.3f} to {depths.max():.3f} meters")
+    # 2) Load keypoints
+    kp1, desc1 = load_keypoints('office/kp.mat', frame_idx1)
+    kp2, desc2 = load_keypoints('office/kp.mat', frame_idx2)
+    
+    # 3) Match descriptors
+    matches = find_matches(desc1, desc2, ratio_threshold=0.85)
+    
+    # 4) Convert matched keypoints to 3D
+    p1_list = []
+    p2_list = []
+    for (i1, i2) in matches:
+        pt1_2d = np.array([[kp1[i1,0], kp1[i1,1]]])
+        pt2_2d = np.array([[kp2[i2,0], kp2[i2,1]]])
         
-        # Print some sample 3D coordinates
-        print("\nSample keypoint 3D coordinates:")
-        for i, idx in enumerate(sample_idx):
-            coord = keypoint_3d[idx]
-            print(f"P{i+1}: ({coord[0]:.3f}, {coord[1]:.3f}, {coord[2]:.3f}) meters")
+        p1 = keypoints_to_3d(pt1_2d, depth1, f1)
+        p2 = keypoints_to_3d(pt2_2d, depth2, f2)
+        
+        if len(p1) > 0 and len(p2) > 0:
+            p1_list.append(p1[0])
+            p2_list.append(p2[0])
+    
+    if len(p1_list) < 10:
+        return None
+        
+    p1_arr = np.array(p1_list, dtype=np.float32)
+    p2_arr = np.array(p2_list, dtype=np.float32)
+    
+    # 5) Estimate transform using RANSAC
+    R, t = estimate_rigid_transform_ransac(p1_arr, p2_arr)
+    
+    # Calculate quality metrics
+    R_error = np.linalg.norm(R - np.eye(3), 'fro')
+    num_matches = len(p1_arr)
+    
+    return {
+        'frame1': frame_idx1,
+        'frame2': frame_idx2,
+        'R': R,
+        't': t,
+        'R_error': R_error,
+        'num_matches': num_matches,
+        'depth1': depth1,
+        'depth2': depth2,
+        'f1': f1,
+        'f2': f2
+    }
 
 def main():
-    # Load dataset
-    data = scipy.io.loadmat('office/cams_info_no_extr.mat')
-    cams_info = data['cams_info']
+    # Debug keypoints file first
+    kp_data = scipy.io.loadmat('office/kp.mat')
+    print("\nKeypoint file contents:")
+    print("Keys in kp_data:", kp_data.keys())
     
-    # Process two consecutive frames
-    frame_idx1, frame_idx2 = 0, 1
+    # Find all keys that start with 'Feature_img'
+    feature_keys = [k for k in kp_data.keys() if k.startswith('Feature_img')]
+    print("\nNumber of frames with features:", len(feature_keys))
+    print("Feature frame keys:", feature_keys)
     
-    # Load frames
-    frame1 = cams_info[frame_idx1, 0]
-    frame2 = cams_info[frame_idx2, 0]
+    if feature_keys:
+        # Look at first feature frame
+        first_frame = kp_data[feature_keys[0]][0,0]
+        if hasattr(first_frame, 'dtype'):
+            print("\nFields in first feature frame:", first_frame.dtype.names)
     
-    # Generate point clouds
-    height, width = frame1['depth'][0,0].shape
-    principal_point = ((width-1)/2, (height-1)/2)
+    # Original camera info loading
+    cams_data = scipy.io.loadmat('office/cams_info_no_extr.mat')
+    print("\nKeys in cams_data:", cams_data.keys())
     
-    points1, _ = create_point_cloud(
-        frame1['rgb'][0,0],
-        frame1['depth'][0,0],
-        frame1['focal_lenght'][0,0],
-        principal_point
-    )
+    cams_info = cams_data['cams_info']
+    print("\nShape of cams_info:", cams_info.shape)
+    print("Type of cams_info:", type(cams_info))
     
-    points2, _ = create_point_cloud(
-        frame2['rgb'][0,0],
-        frame2['depth'][0,0],
-        frame2['focal_lenght'][0,0],
-        principal_point
-    )
+    # Debug first frame
+    frame0 = cams_info[0,0]
+    if hasattr(frame0, 'dtype'):
+        print("\nFields in first frame:", frame0.dtype.names)
     
-    # Load and match keypoints
-    kp1, desc1 = load_keypoints(frame_idx1)
-    kp2, desc2 = load_keypoints(frame_idx2)
+    num_frames = len(cams_info)
+    print(f"\nTotal frames available: {num_frames}")
     
-    # Verify keypoint mapping for both frames
-    print("\nVerifying Frame 1 Keypoint Mapping:")
-    verify_keypoint_mapping(frame1, kp1, "Frame 1 Keypoint Mapping")
+    # Try all consecutive pairs
+    results = []
+    for i in range(num_frames - 1):
+        print(f"\nProcessing frames {i} and {i+1}...")
+        result = process_frame_pair(cams_info, i, i+1)
+        if result is not None:
+            results.append(result)
+            print(f"Matches: {result['num_matches']}, R error: {result['R_error']:.3f}")
     
-    print("\nVerifying Frame 2 Keypoint Mapping:")
-    verify_keypoint_mapping(frame2, kp2, "Frame 2 Keypoint Mapping")
+    if not results:
+        print("No good frame pairs found!")
+        return
+        
+    # Find best pair based on number of matches and R error
+    best_result = min(results, key=lambda x: x['R_error'])
+    print(f"\nBest frame pair: {best_result['frame1']} and {best_result['frame2']}")
+    print(f"Number of matches: {best_result['num_matches']}")
+    print(f"R error: {best_result['R_error']:.3f}")
+    print("\nEstimated R:\n", best_result['R'])
+    print("Estimated t:\n", best_result['t'])
     
-    # Continue with existing matching and visualization
-    matches = find_matches(desc1, desc2)
-    print(f"\nFound {len(matches)} matches between frames {frame_idx1} and {frame_idx2}")
-    
-    # Visualize matches
-    visualize_matches(points1, points2, matches, 
-                     f"Matches between frames {frame_idx1} and {frame_idx2}")
-    
-    # TODO: Add your registration code here
-    # For now, just use identity transformation
-    R = np.eye(3)
-    t = np.zeros(3)
-    
-    # Visualize registration result
-    visualize_registration_result(points1, points2, R, t,
-                                f"Registration between frames {frame_idx1} and {frame_idx2}")
+    # Visualize best pair
+    dense_points1 = get_dense_points(best_result['depth1'], best_result['f1'])
+    dense_points2 = get_dense_points(best_result['depth2'], best_result['f2'])
+    visualize_registration(dense_points1, dense_points2, best_result['R'], best_result['t'])
 
 if __name__ == "__main__":
-    main() 
+    main()
