@@ -118,8 +118,8 @@ def procrustes_registration(points1, points2, max_iterations=1000, distance_thre
 def register_consecutive_frames(cams_info, frame_idx1, frame_idx2):
     """Register two consecutive point clouds using keypoint correspondences."""
     # Load point clouds
-    points1, _ = load_and_process_frame(cams_info, frame_idx1)
-    points2, _ = load_and_process_frame(cams_info, frame_idx2)
+    points1, _, pixel_indices1 = load_and_process_frame(cams_info, frame_idx1)
+    points2, _, pixel_indices2 = load_and_process_frame(cams_info, frame_idx2)
     
     # Load keypoints and descriptors
     kp1, desc1 = load_keypoints(frame_idx1)
@@ -136,20 +136,46 @@ def register_consecutive_frames(cams_info, frame_idx1, frame_idx2):
         raise ValueError(f"Not enough matches between frames {frame_idx1} and {frame_idx2}")
     
     # Convert keypoint coordinates to indices
-    height, width = 512, 256  # From the image dimensions
+    height, width = 512, 256
     kp1_indices = (kp1[:, 1] * width + kp1[:, 0]).astype(int)
     kp2_indices = (kp2[:, 1] * width + kp2[:, 0]).astype(int)
     
-    # Get matched 3D points
-    matched_points1 = points1[kp1_indices[matches[:,0]]]
-    matched_points2 = points2[kp2_indices[matches[:,1]]]
+    # Map keypoint indices to point cloud indices
+    valid_matches = []
+    matched_points1 = []
+    matched_points2 = []
     
-    print(f"Matched points shapes: {matched_points1.shape}, {matched_points2.shape}")
+    for match_idx1, match_idx2 in matches:
+        kp_idx1 = kp1_indices[match_idx1]
+        kp_idx2 = kp2_indices[match_idx2]
+        
+        # Check if both keypoints have valid depth points
+        if kp_idx1 in pixel_indices1 and kp_idx2 in pixel_indices2:
+            # Find positions in the filtered point clouds
+            pos1 = np.where(pixel_indices1 == kp_idx1)[0]
+            pos2 = np.where(pixel_indices2 == kp_idx2)[0]
+            
+            if len(pos1) > 0 and len(pos2) > 0:
+                matched_points1.append(points1[pos1[0]])
+                matched_points2.append(points2[pos2[0]])
+                valid_matches.append((match_idx1, match_idx2))
     
-    # Estimate transformation
-    R, t = procrustes_registration(matched_points1, matched_points2)
+    matched_points1 = np.array(matched_points1)
+    matched_points2 = np.array(matched_points2)
     
-    return R, t, len(matches)
+    print(f"Valid matches with depth: {len(valid_matches)}")
+    
+    if len(valid_matches) < 10:
+        raise ValueError(f"Not enough valid matches with depth between frames {frame_idx1} and {frame_idx2}")
+    
+    # Estimate transformation with adjusted RANSAC parameters
+    # Distance threshold based on scene scale (about 5% of max scene depth)
+    distance_threshold = 0.2  # 20cm, based on scene depth range of ~4m
+    R, t = procrustes_registration(matched_points1, matched_points2, 
+                                 max_iterations=2000,  # More iterations for better results
+                                 distance_threshold=distance_threshold)
+    
+    return R, t, len(valid_matches)
 
 def main():
     # Load dataset
