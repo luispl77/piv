@@ -386,10 +386,9 @@ def visualize_merged_pointcloud(points_list, colors_list):
     
     plt.show()
 
-def reconstruct_scene(cams_info):
-    """Reconstruct full scene from all frames."""
-    num_frames = len(cams_info)
-    print(f"Processing {num_frames} frames...")
+def reconstruct_scene(cams_info, frame_indices=[0, 3, 7]):
+    """Reconstruct scene from specific frames."""
+    print(f"Processing frames: {frame_indices}")
     
     # Lists to store all points and colors
     points_list = []
@@ -400,7 +399,7 @@ def reconstruct_scene(cams_info):
     ts = [np.zeros(3)]
     
     # Process first frame
-    rgb0, depth0, f0 = load_frame(cams_info, 0)
+    rgb0, depth0, f0 = load_frame(cams_info, frame_indices[0])
     print("\nFirst frame info:")
     print(f"RGB shape: {rgb0.shape}, dtype: {rgb0.dtype}")
     print(f"Depth shape: {depth0.shape}, dtype: {depth0.dtype}")
@@ -411,16 +410,18 @@ def reconstruct_scene(cams_info):
     colors_list.append(colors0)
     
     # Process remaining frames
-    for i in range(1, num_frames):
-        print(f"\nProcessing frame {i}...")
+    for i in range(1, len(frame_indices)):
+        curr_frame_idx = frame_indices[i]
+        prev_frame_idx = frame_indices[i-1]
+        print(f"\nProcessing frame {curr_frame_idx} (relative to frame {prev_frame_idx})...")
         
         # Load current frame
-        rgb_i, depth_i, f_i = load_frame(cams_info, i)
+        rgb_i, depth_i, f_i = load_frame(cams_info, curr_frame_idx)
         points_i, colors_i = get_colored_points(rgb_i, depth_i, f_i)
         
         # Get keypoints and match with previous frame
-        kp_prev, desc_prev = load_keypoints('office/kp.mat', i-1)
-        kp_curr, desc_curr = load_keypoints('office/kp.mat', i)
+        kp_prev, desc_prev = load_keypoints('office/kp.mat', prev_frame_idx)
+        kp_curr, desc_curr = load_keypoints('office/kp.mat', curr_frame_idx)
         
         matches = find_matches(desc_prev, desc_curr, ratio_threshold=0.85)
         print(f"Found {len(matches)} matches")
@@ -440,7 +441,7 @@ def reconstruct_scene(cams_info):
                 p2_list.append(p2[0])
         
         if len(p1_list) < 10:
-            print(f"Warning: Not enough matches for frame {i}, skipping...")
+            print(f"Warning: Not enough matches for frame {curr_frame_idx}, skipping...")
             continue
             
         p1_arr = np.array(p1_list, dtype=np.float32)
@@ -466,7 +467,7 @@ def reconstruct_scene(cams_info):
         points_list.append(points_transformed)
         colors_list.append(colors_i)
         
-        print(f"Added {len(points_i)} points from frame {i}")
+        print(f"Added {len(points_i)} points from frame {curr_frame_idx}")
     
     return points_list, colors_list
 
@@ -475,8 +476,11 @@ def main():
     cams_data = scipy.io.loadmat('office/cams_info_no_extr.mat')
     cams_info = cams_data['cams_info']
     
+    # Specify which frames to use
+    frame_indices = [0, 3, 7]
+    
     print("Starting scene reconstruction...")
-    points_list, colors_list = reconstruct_scene(cams_info)
+    points_list, colors_list = reconstruct_scene(cams_info, frame_indices)
     
     print("\nVisualizing merged point cloud...")
     visualize_merged_pointcloud(points_list, colors_list)
