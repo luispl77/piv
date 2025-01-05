@@ -149,7 +149,7 @@ def estimate_rigid_transform(p1, p2):
     t = c1 - R @ c2
     return R, t
 
-def estimate_rigid_transform_ransac(p1, p2, max_iterations=1000, distance_threshold=0.1):
+def estimate_rigid_transform_ransac(p1, p2, max_iterations=10000, distance_threshold=0.07):
     """
     Estimate rigid transform using RANSAC to handle outliers.
     """
@@ -483,7 +483,10 @@ def main():
     
     # Use more frames with smaller gaps
     # We'll use frames 0,1,2,3,4,5 to get a more continuous reconstruction
-    frame_indices = [0, 3, 7, 4, 1, 9]
+    frame_indices = [0, 3, 7, 4, 1, 9, 5, 6, 2, 8] #all images, 0.07 thresh, ransac 10k iterations
+    #frame_indices = [0, 3, 7, 4, 1, 9] #full table
+    #frame_indices = [0, 3, 7, 4, 1, 9, 5, 6, 2] #more sorrounding details, table objects become less good
+
     
     print("Starting scene reconstruction...")
     points_list, colors_list = reconstruct_scene(cams_info, frame_indices)
