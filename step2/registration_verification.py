@@ -54,8 +54,13 @@ def keypoints_to_3d(kp, depth, focal_length):
     Convert 2D keypoints (kp) into 3D coordinates using the depth map.
     Assumes same fx, fy and principal point at center.
     """
-    fx = float(focal_length[0,0]) if focal_length.size > 1 else float(focal_length)
-    fy = fx
+    # Handle focal length properly
+    if focal_length.size > 1:
+        fx = float(focal_length[0,0].item())  # Use .item() to avoid deprecation warning
+        fy = fx
+    else:
+        fx = float(focal_length)
+        fy = fx
     H, W = depth.shape
     cx, cy = (W-1)/2.0, (H-1)/2.0
     
@@ -77,7 +82,7 @@ def keypoints_to_3d(kp, depth, focal_length):
     
     # Match point_cloud_generator.py coordinate system
     X_cam = -(u - cx)*z / fx
-    Y_cam = -(v - cy)*z / fy  # Note the negation to match point_cloud_generator
+    Y_cam = -(v - cy)*z / fy
     Z_cam = z
     
     pts_3d = np.stack([X_cam, Y_cam, Z_cam], axis=-1)
@@ -295,64 +300,194 @@ def process_frame_pair(cams_info, frame_idx1, frame_idx2):
         'f2': f2
     }
 
-def main():
-    # Debug keypoints file first
-    kp_data = scipy.io.loadmat('office/kp.mat')
-    print("\nKeypoint file contents:")
-    print("Keys in kp_data:", kp_data.keys())
+def get_colored_points(rgb, depth, focal_length, subsample=50):
+    """Generate colored point cloud from RGB-D data."""
+    height, width = depth.shape
+    # Handle focal length properly
+    if focal_length.size > 1:
+        fx = float(focal_length[0,0].item())  # Use .item() to avoid deprecation warning
+        fy = float(focal_length[0,0].item())
+    else:
+        fx = float(focal_length)
+        fy = fx
+    cx, cy = (width-1)/2.0, (height-1)/2.0
     
-    # Find all keys that start with 'Feature_img'
-    feature_keys = [k for k in kp_data.keys() if k.startswith('Feature_img')]
-    print("\nNumber of frames with features:", len(feature_keys))
-    print("Feature frame keys:", feature_keys)
+    # Create pixel coordinate grid
+    u, v = np.meshgrid(np.arange(width), np.arange(height))
     
-    if feature_keys:
-        # Look at first feature frame
-        first_frame = kp_data[feature_keys[0]][0,0]
-        if hasattr(first_frame, 'dtype'):
-            print("\nFields in first feature frame:", first_frame.dtype.names)
+    # Get all points where depth is valid
+    valid_points = depth > 0
     
-    # Original camera info loading
-    cams_data = scipy.io.loadmat('office/cams_info_no_extr.mat')
-    print("\nKeys in cams_data:", cams_data.keys())
+    # Get valid coordinates
+    v_valid = v[valid_points]
+    u_valid = u[valid_points]
+    z_valid = depth[valid_points]
     
-    cams_info = cams_data['cams_info']
-    print("\nShape of cams_info:", cams_info.shape)
-    print("Type of cams_info:", type(cams_info))
+    # Subsample points
+    num_points = len(z_valid)
+    sample_size = num_points // subsample
+    sample_indices = np.random.choice(num_points, sample_size, replace=False)
     
-    # Debug first frame
-    frame0 = cams_info[0,0]
-    if hasattr(frame0, 'dtype'):
-        print("\nFields in first frame:", frame0.dtype.names)
+    v_valid = v_valid[sample_indices]
+    u_valid = u_valid[sample_indices]
+    z_valid = z_valid[sample_indices]
     
+    # Calculate X and Y coordinates
+    x_valid = -(u_valid - cx) * z_valid / fx
+    y_valid = -(v_valid - cy) * z_valid / fy
+    points = np.stack([x_valid, y_valid, z_valid], axis=1)
+    
+    # Get colors - make sure RGB is in the right format
+    if rgb.dtype != np.uint8:
+        rgb = (rgb * 255).astype(np.uint8)
+    colors = rgb[v_valid, u_valid] / 255.0  # Normalize to [0,1]
+    
+    return points, colors
+
+def visualize_merged_pointcloud(points_list, colors_list):
+    """Visualize merged point cloud with colors."""
+    # Combine all points and colors
+    all_points = np.vstack(points_list)
+    all_colors = np.vstack(colors_list)
+    
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Plot points with explicit RGB values
+    scatter = ax.scatter(all_points[:,0], all_points[:,1], all_points[:,2], 
+                        c=all_colors, s=1)
+    
+    # Set equal aspect ratio
+    max_range = np.array([all_points[:,0].max()-all_points[:,0].min(),
+                         all_points[:,1].max()-all_points[:,1].min(),
+                         all_points[:,2].max()-all_points[:,2].min()]).max() / 2.0
+    
+    mid_x = (all_points[:,0].max()+all_points[:,0].min()) * 0.5
+    mid_y = (all_points[:,1].max()+all_points[:,1].min()) * 0.5
+    mid_z = (all_points[:,2].max()+all_points[:,2].min()) * 0.5
+    
+    ax.set_xlim(mid_x - max_range, mid_x + max_range)
+    ax.set_ylim(mid_y - max_range, mid_y + max_range)
+    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    
+    # Set view angle for better visualization
+    ax.view_init(elev=30, azim=45)
+    
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Merged Point Cloud')
+    
+    # Add a debug print to check color ranges
+    print("\nColor statistics:")
+    print(f"Min RGB: {np.min(all_colors, axis=0)}")
+    print(f"Max RGB: {np.max(all_colors, axis=0)}")
+    print(f"Mean RGB: {np.mean(all_colors, axis=0)}")
+    
+    plt.show()
+
+def reconstruct_scene(cams_info):
+    """Reconstruct full scene from all frames."""
     num_frames = len(cams_info)
-    print(f"\nTotal frames available: {num_frames}")
+    print(f"Processing {num_frames} frames...")
     
-    # Try all consecutive pairs
-    results = []
-    for i in range(num_frames - 1):
-        print(f"\nProcessing frames {i} and {i+1}...")
-        result = process_frame_pair(cams_info, i, i+1)
-        if result is not None:
-            results.append(result)
-            print(f"Matches: {result['num_matches']}, R error: {result['R_error']:.3f}")
+    # Lists to store all points and colors
+    points_list = []
+    colors_list = []
     
-    if not results:
-        print("No good frame pairs found!")
-        return
+    # Lists to store transformations
+    Rs = [np.eye(3)]  # First frame is reference
+    ts = [np.zeros(3)]
+    
+    # Process first frame
+    rgb0, depth0, f0 = load_frame(cams_info, 0)
+    print("\nFirst frame info:")
+    print(f"RGB shape: {rgb0.shape}, dtype: {rgb0.dtype}")
+    print(f"Depth shape: {depth0.shape}, dtype: {depth0.dtype}")
+    print(f"Depth range: [{np.min(depth0)}, {np.max(depth0)}]")
+    
+    points0, colors0 = get_colored_points(rgb0, depth0, f0)
+    points_list.append(points0)
+    colors_list.append(colors0)
+    
+    # Process remaining frames
+    for i in range(1, num_frames):
+        print(f"\nProcessing frame {i}...")
         
-    # Find best pair based on number of matches and R error
-    best_result = min(results, key=lambda x: x['R_error'])
-    print(f"\nBest frame pair: {best_result['frame1']} and {best_result['frame2']}")
-    print(f"Number of matches: {best_result['num_matches']}")
-    print(f"R error: {best_result['R_error']:.3f}")
-    print("\nEstimated R:\n", best_result['R'])
-    print("Estimated t:\n", best_result['t'])
+        # Load current frame
+        rgb_i, depth_i, f_i = load_frame(cams_info, i)
+        points_i, colors_i = get_colored_points(rgb_i, depth_i, f_i)
+        
+        # Get keypoints and match with previous frame
+        kp_prev, desc_prev = load_keypoints('office/kp.mat', i-1)
+        kp_curr, desc_curr = load_keypoints('office/kp.mat', i)
+        
+        matches = find_matches(desc_prev, desc_curr, ratio_threshold=0.85)
+        print(f"Found {len(matches)} matches")
+        
+        # Convert matches to 3D points
+        p1_list = []
+        p2_list = []
+        for (i1, i2) in matches:
+            pt1_2d = np.array([[kp_prev[i1,0], kp_prev[i1,1]]])
+            pt2_2d = np.array([[kp_curr[i2,0], kp_curr[i2,1]]])
+            
+            p1 = keypoints_to_3d(pt1_2d, depth_i, f_i)
+            p2 = keypoints_to_3d(pt2_2d, depth_i, f_i)
+            
+            if len(p1) > 0 and len(p2) > 0:
+                p1_list.append(p1[0])
+                p2_list.append(p2[0])
+        
+        if len(p1_list) < 10:
+            print(f"Warning: Not enough matches for frame {i}, skipping...")
+            continue
+            
+        p1_arr = np.array(p1_list, dtype=np.float32)
+        p2_arr = np.array(p2_list, dtype=np.float32)
+        
+        # Estimate transform with RANSAC
+        R, t = estimate_rigid_transform_ransac(p1_arr, p2_arr)
+        print(f"Estimated R:\n{R}")
+        print(f"Estimated t:\n{t}")
+        
+        # Compose transformation with previous ones
+        R_total = Rs[-1] @ R
+        t_total = Rs[-1] @ t + ts[-1]
+        
+        # Store transformations
+        Rs.append(R_total)
+        ts.append(t_total)
+        
+        # Transform points to reference frame
+        points_transformed = (R_total @ points_i.T).T + t_total
+        
+        # Add to lists
+        points_list.append(points_transformed)
+        colors_list.append(colors_i)
+        
+        print(f"Added {len(points_i)} points from frame {i}")
     
-    # Visualize best pair
-    dense_points1 = get_dense_points(best_result['depth1'], best_result['f1'])
-    dense_points2 = get_dense_points(best_result['depth2'], best_result['f2'])
-    visualize_registration(dense_points1, dense_points2, best_result['R'], best_result['t'])
+    return points_list, colors_list
+
+def main():
+    # Load camera info
+    cams_data = scipy.io.loadmat('office/cams_info_no_extr.mat')
+    cams_info = cams_data['cams_info']
+    
+    print("Starting scene reconstruction...")
+    points_list, colors_list = reconstruct_scene(cams_info)
+    
+    print("\nVisualizing merged point cloud...")
+    visualize_merged_pointcloud(points_list, colors_list)
+    
+    # Save the reconstruction
+    output = {
+        'points': np.vstack(points_list),
+        'colors': np.vstack(colors_list)
+    }
+    scipy.io.savemat('output.mat', output)
+    print("\nSaved reconstruction to output.mat")
 
 if __name__ == "__main__":
     main()
