@@ -344,45 +344,90 @@ def get_colored_points(rgb, depth, focal_length, subsample=50):
     
     return points, colors
 
-def visualize_merged_pointcloud(points_list, colors_list):
-    """Visualize merged point cloud with colors."""
+def align_to_gravity(points):
+    """Align point cloud so that major planes are aligned with coordinate axes."""
+    # Compute PCA to find main directions
+    center = np.mean(points, axis=0)
+    centered_points = points - center
+    
+    # Compute covariance matrix
+    cov = centered_points.T @ centered_points
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    
+    # Sort by eigenvalue magnitude
+    idx = eigenvalues.argsort()[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+    
+    # Assume smallest eigenvector corresponds to up direction (normal to floor)
+    # and largest to main room direction
+    R_align = eigenvectors
+    
+    # Ensure right-handed coordinate system
+    if np.linalg.det(R_align) < 0:
+        R_align[:, 2] *= -1
+    
+    # Transform points
+    aligned_points = (R_align.T @ centered_points.T).T
+    
+    return aligned_points, R_align, center
+
+def visualize_merged_pointcloud(points_list, colors_list, align_gravity=True):
+    """Visualize merged point cloud with colors and proper orientation."""
     # Combine all points and colors
     all_points = np.vstack(points_list)
     all_colors = np.vstack(colors_list)
     
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.add_subplot(111, projection='3d')
+    if align_gravity:
+        all_points, R_align, center = align_to_gravity(all_points)
+        print("\nAlignment transformation:")
+        print("Rotation matrix:")
+        print(R_align)
     
-    # Plot points with explicit RGB values
-    scatter = ax.scatter(all_points[:,0], all_points[:,1], all_points[:,2], 
-                        c=all_colors, s=1)
+    fig = plt.figure(figsize=(15, 5))
     
-    # Set equal aspect ratio
-    max_range = np.array([all_points[:,0].max()-all_points[:,0].min(),
-                         all_points[:,1].max()-all_points[:,1].min(),
-                         all_points[:,2].max()-all_points[:,2].min()]).max() / 2.0
+    # Create three different views
+    views = [
+        (30, 45, '3D View'),
+        (0, 0, 'Front View'),
+        (90, 0, 'Top View')
+    ]
     
-    mid_x = (all_points[:,0].max()+all_points[:,0].min()) * 0.5
-    mid_y = (all_points[:,1].max()+all_points[:,1].min()) * 0.5
-    mid_z = (all_points[:,2].max()+all_points[:,2].min()) * 0.5
+    for i, (elev, azim, title) in enumerate(views, 1):
+        ax = fig.add_subplot(1, 3, i, projection='3d')
+        
+        # Plot points
+        scatter = ax.scatter(all_points[:,0], all_points[:,1], all_points[:,2], 
+                           c=all_colors, s=1)
+        
+        # Set equal aspect ratio
+        max_range = np.array([all_points[:,0].max()-all_points[:,0].min(),
+                            all_points[:,1].max()-all_points[:,1].min(),
+                            all_points[:,2].max()-all_points[:,2].min()]).max() / 2.0
+        
+        mid_x = (all_points[:,0].max()+all_points[:,0].min()) * 0.5
+        mid_y = (all_points[:,1].max()+all_points[:,1].min()) * 0.5
+        mid_z = (all_points[:,2].max()+all_points[:,2].min()) * 0.5
+        
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        
+        # Set view angle
+        ax.view_init(elev=elev, azim=azim)
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title(title)
     
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    plt.tight_layout()
     
-    # Set view angle for better visualization
-    ax.view_init(elev=30, azim=45)
-    
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title('Merged Point Cloud')
-    
-    # Add a debug print to check color ranges
-    print("\nColor statistics:")
-    print(f"Min RGB: {np.min(all_colors, axis=0)}")
-    print(f"Max RGB: {np.max(all_colors, axis=0)}")
-    print(f"Mean RGB: {np.mean(all_colors, axis=0)}")
+    # Add a debug print to check point cloud statistics
+    print("\nPoint cloud statistics:")
+    print(f"X range: [{np.min(all_points[:,0]):.2f}, {np.max(all_points[:,0]):.2f}]")
+    print(f"Y range: [{np.min(all_points[:,1]):.2f}, {np.max(all_points[:,1]):.2f}]")
+    print(f"Z range: [{np.min(all_points[:,2]):.2f}, {np.max(all_points[:,2]):.2f}]")
     
     plt.show()
 
@@ -481,18 +526,14 @@ def main():
     cams_data = scipy.io.loadmat('office/cams_info_no_extr.mat')
     cams_info = cams_data['cams_info']
     
-    # Use more frames with smaller gaps
-    # We'll use frames 0,1,2,3,4,5 to get a more continuous reconstruction
-    frame_indices = [0, 3, 7, 4, 1, 9, 5, 6, 2, 8] #all images, 0.07 thresh, ransac 10k iterations
-    #frame_indices = [0, 3, 7, 4, 1, 9] #full table
-    #frame_indices = [0, 3, 7, 4, 1, 9, 5, 6, 2] #more sorrounding details, table objects become less good
-
+    # Use frames that worked well
+    frame_indices = [0, 3, 7, 4, 1, 9]  # Using the sequence that gave good table reconstruction
     
     print("Starting scene reconstruction...")
     points_list, colors_list = reconstruct_scene(cams_info, frame_indices)
     
     print("\nVisualizing merged point cloud...")
-    visualize_merged_pointcloud(points_list, colors_list)
+    visualize_merged_pointcloud(points_list, colors_list, align_gravity=True)
     
     # Save the reconstruction
     output = {
