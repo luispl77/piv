@@ -416,8 +416,12 @@ def reconstruct_scene(cams_info, frame_indices=[0, 3, 7]):
         print(f"\nProcessing frame {curr_frame_idx} (relative to frame {prev_frame_idx})...")
         
         # Load current frame
-        rgb_i, depth_i, f_i = load_frame(cams_info, curr_frame_idx)
-        points_i, colors_i = get_colored_points(rgb_i, depth_i, f_i)
+        rgb_curr, depth_curr, f_curr = load_frame(cams_info, curr_frame_idx)
+        # Load previous frame
+        rgb_prev, depth_prev, f_prev = load_frame(cams_info, prev_frame_idx)
+        
+        # Get current frame's points and colors
+        points_curr, colors_curr = get_colored_points(rgb_curr, depth_curr, f_curr)
         
         # Get keypoints and match with previous frame
         kp_prev, desc_prev = load_keypoints('office/kp.mat', prev_frame_idx)
@@ -433,8 +437,9 @@ def reconstruct_scene(cams_info, frame_indices=[0, 3, 7]):
             pt1_2d = np.array([[kp_prev[i1,0], kp_prev[i1,1]]])
             pt2_2d = np.array([[kp_curr[i2,0], kp_curr[i2,1]]])
             
-            p1 = keypoints_to_3d(pt1_2d, depth_i, f_i)
-            p2 = keypoints_to_3d(pt2_2d, depth_i, f_i)
+            # Use correct depth maps and focal lengths for each frame
+            p1 = keypoints_to_3d(pt1_2d, depth_prev, f_prev)  # Previous frame
+            p2 = keypoints_to_3d(pt2_2d, depth_curr, f_curr)  # Current frame
             
             if len(p1) > 0 and len(p2) > 0:
                 p1_list.append(p1[0])
@@ -461,13 +466,13 @@ def reconstruct_scene(cams_info, frame_indices=[0, 3, 7]):
         ts.append(t_total)
         
         # Transform points to reference frame
-        points_transformed = (R_total @ points_i.T).T + t_total
+        points_transformed = (R_total @ points_curr.T).T + t_total
         
         # Add to lists
         points_list.append(points_transformed)
-        colors_list.append(colors_i)
+        colors_list.append(colors_curr)
         
-        print(f"Added {len(points_i)} points from frame {curr_frame_idx}")
+        print(f"Added {len(points_curr)} points from frame {curr_frame_idx}")
     
     return points_list, colors_list
 
@@ -476,7 +481,8 @@ def main():
     cams_data = scipy.io.loadmat('office/cams_info_no_extr.mat')
     cams_info = cams_data['cams_info']
     
-    # Specify which frames to use
+    # Use more frames with smaller gaps
+    # We'll use frames 0,1,2,3,4,5 to get a more continuous reconstruction
     frame_indices = [0, 3, 7]
     
     print("Starting scene reconstruction...")
@@ -488,10 +494,18 @@ def main():
     # Save the reconstruction
     output = {
         'points': np.vstack(points_list),
-        'colors': np.vstack(colors_list)
+        'colors': np.vstack(colors_list),
+        'frame_indices': frame_indices
     }
     scipy.io.savemat('output.mat', output)
     print("\nSaved reconstruction to output.mat")
+    
+    # Print final statistics
+    total_points = sum(len(points) for points in points_list)
+    print(f"\nFinal reconstruction statistics:")
+    print(f"Number of frames used: {len(frame_indices)}")
+    print(f"Total points in reconstruction: {total_points}")
+    print(f"Average points per frame: {total_points / len(frame_indices)}")
 
 if __name__ == "__main__":
     main()
