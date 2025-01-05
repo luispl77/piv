@@ -115,6 +115,124 @@ def visualize_registration_result(points1, points2, R, t, title="Registration Re
     print(f"  Y: {t[1]:.3f}")
     print(f"  Z: {t[2]:.3f}")
 
+def get_3d_points_from_keypoints(kp, depth, focal_length, principal_point):
+    """Convert 2D keypoints to 3D points using depth data."""
+    fx, fy = float(focal_length[0,0]), float(focal_length[0,0])
+    cx, cy = principal_point
+    
+    # Round keypoint coordinates to get depth values
+    u = np.round(kp[:,0]).astype(int)
+    v = np.round(kp[:,1]).astype(int)
+    
+    # Get depth values for keypoints
+    z = depth[v, u]
+    
+    # Back-project to 3D
+    x = -(u - cx) * z / fx
+    y = (v - cy) * z / fy
+    
+    return np.stack([x, y, z], axis=1)
+
+def verify_keypoint_mapping(frame_data, kp, title="Keypoint 3D Mapping"):
+    """Visualize how 2D keypoints map to 3D space."""
+    rgb = frame_data['rgb'][0,0]
+    depth = frame_data['depth'][0,0]
+    focal_length = frame_data['focal_lenght'][0,0]
+    height, width = depth.shape
+    principal_point = ((width-1)/2, (height-1)/2)
+    
+    # Round keypoint coordinates to get depth values
+    u = np.round(kp[:,0]).astype(int)
+    v = np.round(kp[:,1]).astype(int)
+    
+    # Ensure keypoints are within image bounds
+    valid_coords = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    valid_depths = np.zeros_like(u, dtype=bool)
+    valid_depths[valid_coords] = depth[v[valid_coords], u[valid_coords]] > 0
+    
+    # Get full point cloud
+    points, colors = create_point_cloud(rgb, depth, focal_length, principal_point)
+    
+    # Get 3D points for keypoints
+    keypoint_3d = get_3d_points_from_keypoints(kp, depth, focal_length, principal_point)
+    
+    # Create figure with 2x2 subplots
+    fig = plt.figure(figsize=(20, 15))
+    
+    # 1. RGB Image with keypoints
+    ax1 = fig.add_subplot(221)
+    ax1.imshow(rgb)
+    ax1.scatter(kp[valid_depths,0], kp[valid_depths,1], c='g', s=20, label='Valid Keypoints')
+    ax1.scatter(kp[~valid_depths,0], kp[~valid_depths,1], c='r', s=20, label='Invalid Keypoints')
+    ax1.set_title('RGB Image with Keypoints')
+    ax1.legend()
+    
+    # 2. Depth map with keypoints
+    ax2 = fig.add_subplot(222)
+    depth_vis = depth.copy()
+    depth_vis[depth_vis == 0] = np.nan  # Make invalid depths transparent
+    im = ax2.imshow(depth_vis, cmap='viridis')
+    ax2.scatter(kp[valid_depths,0], kp[valid_depths,1], c='g', s=20, label='Valid Keypoints')
+    ax2.scatter(kp[~valid_depths,0], kp[~valid_depths,1], c='r', s=20, label='Invalid Keypoints')
+    ax2.set_title('Depth Map with Keypoints')
+    plt.colorbar(im, ax=ax2, label='Depth (meters)')
+    ax2.legend()
+    
+    # 3. 3D point cloud with keypoints
+    ax3 = fig.add_subplot(223, projection='3d')
+    ax3.scatter(points[:,0], points[:,1], points[:,2], c='gray', s=1, alpha=0.1, label='Full Cloud')
+    scatter = ax3.scatter(keypoint_3d[valid_depths,0], 
+                         keypoint_3d[valid_depths,1], 
+                         keypoint_3d[valid_depths,2],
+                         c=depth[v[valid_depths], u[valid_coords]],
+                         cmap='viridis',
+                         s=50, alpha=1, label='Valid Keypoints')
+    plt.colorbar(scatter, ax=ax3, label='Depth (meters)')
+    ax3.set_xlabel('X (meters)')
+    ax3.set_ylabel('Y (meters)')
+    ax3.set_zlabel('Z (meters)')
+    ax3.set_title('3D Point Cloud with Keypoints')
+    ax3.legend()
+    ax3.set_box_aspect([1,1,1])
+    
+    # 4. Local patches around some sample keypoints
+    ax4 = fig.add_subplot(224)
+    ax4.imshow(rgb)
+    # Sample 5 random valid keypoints
+    sample_idx = np.random.choice(np.where(valid_depths)[0], min(5, np.sum(valid_depths)), replace=False)
+    colors = ['r', 'g', 'b', 'y', 'm']
+    for i, idx in enumerate(sample_idx):
+        x, y = kp[idx]
+        # Draw patch boundary
+        patch_size = 20
+        rect = plt.Rectangle((x-patch_size/2, y-patch_size/2), patch_size, patch_size, 
+                           fill=False, color=colors[i])
+        ax4.add_patch(rect)
+        # Add 3D coordinate annotation
+        coord = keypoint_3d[idx]
+        ax4.annotate(f'P{i+1}: ({coord[0]:.2f}, {coord[1]:.2f}, {coord[2]:.2f})',
+                    (x+patch_size/2, y+patch_size/2), color=colors[i])
+    ax4.set_title('Sample Keypoint Patches with 3D Coordinates')
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+    
+    # Print statistics
+    print(f"\nKeypoint Mapping Statistics:")
+    print(f"Total keypoints: {len(kp)}")
+    print(f"Keypoints within image bounds: {np.sum(valid_coords)}")
+    print(f"Keypoints with valid depth: {np.sum(valid_depths)}")
+    if np.sum(valid_depths) > 0:
+        depths = depth[v[valid_depths], u[valid_coords]]
+        print(f"Depth range for valid keypoints: {depths.min():.3f} to {depths.max():.3f} meters")
+        
+        # Print some sample 3D coordinates
+        print("\nSample keypoint 3D coordinates:")
+        for i, idx in enumerate(sample_idx):
+            coord = keypoint_3d[idx]
+            print(f"P{i+1}: ({coord[0]:.3f}, {coord[1]:.3f}, {coord[2]:.3f}) meters")
+
 def main():
     # Load dataset
     data = scipy.io.loadmat('office/cams_info_no_extr.mat')
@@ -148,9 +266,17 @@ def main():
     # Load and match keypoints
     kp1, desc1 = load_keypoints(frame_idx1)
     kp2, desc2 = load_keypoints(frame_idx2)
-    matches = find_matches(desc1, desc2)
     
-    print(f"Found {len(matches)} matches between frames {frame_idx1} and {frame_idx2}")
+    # Verify keypoint mapping for both frames
+    print("\nVerifying Frame 1 Keypoint Mapping:")
+    verify_keypoint_mapping(frame1, kp1, "Frame 1 Keypoint Mapping")
+    
+    print("\nVerifying Frame 2 Keypoint Mapping:")
+    verify_keypoint_mapping(frame2, kp2, "Frame 2 Keypoint Mapping")
+    
+    # Continue with existing matching and visualization
+    matches = find_matches(desc1, desc2)
+    print(f"\nFound {len(matches)} matches between frames {frame_idx1} and {frame_idx2}")
     
     # Visualize matches
     visualize_matches(points1, points2, matches, 
