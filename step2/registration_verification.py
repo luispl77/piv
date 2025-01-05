@@ -527,7 +527,8 @@ def main():
     cams_info = cams_data['cams_info']
     
     # Use frames that worked well
-    frame_indices = [0, 3, 7, 4, 1, 9]  # Using the sequence that gave good table reconstruction
+    #frame_indices = [0, 3, 7, 4, 1, 9]  # Using the sequence that gave good table reconstruction
+    frame_indices = [0, 3, 7, 4, 1, 9, 5, 6, 2, 8] 
     
     print("Starting scene reconstruction...")
     points_list, colors_list = reconstruct_scene(cams_info, frame_indices)
