@@ -9,3 +9,6 @@
 
 # System files
 .DS_Store 
+step2/office/rgb/*
+step2/office/kp.mat
+step2/office/*.mat
